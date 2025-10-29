@@ -1,0 +1,102 @@
+name: nexus testnet node (CLI)
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: "0 */6 * * *"   # chạy mỗi 6 giờ
+
+concurrency:
+  group: nexus-node
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  run-node:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360
+
+    env:
+      DATA_DIR: nexus_data              # state dùng để cache/backup
+      BACKUP_NAME: nexus_state_${{ github.run_id }}.tar.zst
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Swap 12GB + tinh chỉnh nhẹ
+      - name: Provision 12G swap and tune
+        run: |
+          sudo fallocate -l 12G /swapfile
+          sudo chmod 600 /swapfile
+          sudo mkswap /swapfile
+          sudo swapon /swapfile
+          echo 10 | sudo tee /proc/sys/vm/swappiness
+          ulimit -n 1048576 || true
+
+      # Khôi phục cache state (nếu có)
+      - name: Restore chain data cache
+        id: cache-restore
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ env.DATA_DIR }}
+          key: nexus-state-cli-v1-${{ runner.os }}-${{ github.ref_name }}
+          restore-keys: |
+            nexus-state-cli-v1-${{ runner.os }}-
+            nexus-state-cli-v1-
+
+      - name: Ensure data dir
+        run: mkdir -p "${{ env.DATA_DIR }}"
+
+      # Cài Nexus CLI
+      - name: Install Nexus CLI
+        run: |
+          curl -sSfL https://cli.nexus.xyz/ | sh
+          echo "${HOME}/.nexus/bin" >> $GITHUB_PATH
+
+      # Nếu CLI dùng ~/.nexus làm state mặc định, đồng bộ sang DATA_DIR trước khi chạy
+      - name: Prime local CLI state from cache (if exists)
+        run: |
+          mkdir -p "${HOME}/.nexus"
+          rsync -a "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" "${HOME}/.nexus/" || true
+
+      # Chạy foreground ~5h55m (không dùng screen)
+      - name: Start Nexus node (~5h55m) then stop
+        env:
+          NODE_ID: ${{ secrets.NODE_ID }}
+        run: |
+          nexus-network --version || true
+          # Dùng data-dir nếu CLI hỗ trợ; nếu không, CLI sẽ dùng ~/.nexus đã được rsync ở bước trên.
+          timeout 5h55m nexus-network start \
+            --network testnet \
+            --node-id "${NODE_ID}" || true
+
+      # Sau khi dừng, copy state về DATA_DIR để cache/backup
+      - name: Sync back state to cache dir
+        if: always()
+        run: |
+          rsync -a --delete "${HOME}/.nexus/" "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" || true
+
+      # Backup thành artifact
+      - name: Compress data
+        if: always()
+        run: |
+          sudo apt-get update -y && sudo apt-get install -y zstd
+          tar -I "zstd -19" -cf "/tmp/${{ env.BACKUP_NAME }}" -C "${GITHUB_WORKSPACE}" "${{ env.DATA_DIR }}"
+
+      - name: Upload backup artifact (7 days)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.BACKUP_NAME }}
+          path: /tmp/${{ env.BACKUP_NAME }}
+          retention-days: 7
+
+      # Lưu cache mới
+      - name: Save cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ env.DATA_DIR }}
+          key: nexus-state-cli-v1-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
