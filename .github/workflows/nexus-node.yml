@@ -103,7 +103,8 @@ jobs:
             echo "❌ Chưa set secret NODE_ID trong repo (Settings → Secrets → Actions)."
             exit 1
           fi
-          timeout 21300 "${BIN}" start --network testnet --node-id "${NODE_ID}" 2>&1 | tee -a nexus.log || true
+          timeout 21300 "${BIN}" start --node-id "${NODE_ID}" 2>&1 | tee -a nexus.log || true
+
 
       - name: Sync back state
         if: always()
