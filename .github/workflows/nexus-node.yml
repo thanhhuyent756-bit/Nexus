@@ -93,17 +93,32 @@ jobs:
           mkdir -p "${HOME}/.nexus"
           rsync -a "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" "${HOME}/.nexus/" || true
 
-      - name: Start Nexus node (~5h55m)
-        env:
-          NODE_ID: ${{ secrets.NODE_ID }} # phải tạo secret này = 37003063
-        run: |
-          set -eux
-          "${BIN}" --version || true
-          if [ -z "${NODE_ID:-}" ]; then
-            echo "❌ Chưa set secret NODE_ID trong repo (Settings → Secrets → Actions)."
-            exit 1
-          fi
-          timeout 21300 "${BIN}" start --node-id "${NODE_ID}" 2>&1 | tee -a nexus.log || true
+      - name: Start Nexus node (~5h55m) headless
+  env:
+    NODE_ID: ${{ secrets.NODE_ID }}
+    TERM: xterm-256color
+  run: |
+    set -eux
+    "${BIN}" --version || true
+
+    # In log: show available flags to quyết định cách chạy
+    "${BIN}" start --help || true
+
+    # Ưu tiên cờ tắt TUI nếu có
+    if "${BIN}" start --help | grep -q -- '--no-tui'; then
+      CMD="${BIN} start --node-id ${NODE_ID} --no-tui"
+    elif "${BIN}" start --help | grep -qi -- '--daemon'; then
+      CMD="${BIN} start --node-id ${NODE_ID} --daemon"
+    else
+      # Không có flag headless → giả lập TTY bằng 'script'
+      sudo apt-get update -y
+      sudo apt-get install -y util-linux
+      CMD="script -q -e -c '${BIN} start --node-id ${NODE_ID}' /dev/null"
+    fi
+
+    echo "Running: $CMD"
+    # Giữ tiến trình ~5h55m
+    timeout 21300 bash -lc "$CMD" 2>&1 | tee -a nexus.log || true
 
 
       - name: Sync back state
