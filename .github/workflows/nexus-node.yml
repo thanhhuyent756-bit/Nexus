@@ -61,22 +61,37 @@ jobs:
           mkdir -p "${HOME}/.nexus"
           rsync -a "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" "${HOME}/.nexus/" || true
 
-      # Chạy foreground ~5h55m (không dùng screen)
-      - name: Start Nexus node (~5h55m) then stop
-        env:
-          NODE_ID: ${{ secrets.NODE_ID }}
-        run: |
-          nexus-network --version || true
-          # Dùng data-dir nếu CLI hỗ trợ; nếu không, CLI sẽ dùng ~/.nexus đã được rsync ở bước trên.
-          timeout 5h55m nexus-network start \
-            --network testnet \
-            --node-id "${NODE_ID}" || true
+    # Phát hiện binary nexus (nếu tên khác)
+- name: Detect Nexus CLI binary
+  run: |
+    set -eux
+    BIN1="${HOME}/.nexus/bin/nexus-network"
+    BIN2="${HOME}/.nexus/bin/nexus"
+    if [ -x "$BIN1" ]; then
+      echo "BIN=$BIN1" >> $GITHUB_ENV
+    elif [ -x "$BIN2" ]; then
+      echo "BIN=$BIN2" >> $GITHUB_ENV
+    else
+      echo "❌ Không tìm thấy Nexus CLI trong ~/.nexus/bin"; ls -la ~/.nexus/bin || true; exit 1
+    fi
 
-      # Sau khi dừng, copy state về DATA_DIR để cache/backup
-      - name: Sync back state to cache dir
-        if: always()
-        run: |
-          rsync -a --delete "${HOME}/.nexus/" "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" || true
+# Chạy node ~5h55m, stream log và upload artifact
+- name: Start Nexus node (~5h55m)
+  env:
+    NODE_ID: ${{ secrets.NODE_ID }}
+  run: |
+    set -eux
+    "${BIN}" --version || true
+    # Nếu CLI hỗ trợ --data-dir, thêm vào sau start để dùng cache của bạn
+    timeout 5h55m "${BIN}" start --network testnet --node-id "${NODE_ID}" 2>&1 | tee -a nexus.log || true
+
+- name: Upload node log
+  if: always()
+  uses: actions/upload-artifact@v4
+  with:
+    name: nexus.log
+    path: nexus.log
+    retention-days: 7
 
       # Backup thành artifact
       - name: Compress data
