@@ -2,8 +2,11 @@ name: nexus testnet node (CLI)
 
 on:
   workflow_dispatch: {}
+  push:
+    paths:
+      - ".github/workflows/nexus-node.yml"
   schedule:
-    - cron: "0 */6 * * *"   # chạy mỗi 6 giờ
+    - cron: "0 */6 * * *"
 
 concurrency:
   group: nexus-node
@@ -18,14 +21,21 @@ jobs:
     timeout-minutes: 360
 
     env:
-      DATA_DIR: nexus_data              # state dùng để cache/backup
+      DATA_DIR: nexus_data
       BACKUP_NAME: nexus_state_${{ github.run_id }}.tar.zst
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      # Swap 12GB + tinh chỉnh nhẹ
+      - name: Sanity check
+        run: |
+          echo "Runner ready: $(uname -a)"
+          echo "Disk:"
+          df -h /
+          echo "RAM:"
+          free -h
+
       - name: Provision 12G swap and tune
         run: |
           sudo fallocate -l 12G /swapfile
@@ -33,11 +43,11 @@ jobs:
           sudo mkswap /swapfile
           sudo swapon /swapfile
           echo 10 | sudo tee /proc/sys/vm/swappiness
-          ulimit -n 1048576 || true
+          swapon --show
+          free -h
 
-      # Khôi phục cache state (nếu có)
       - name: Restore chain data cache
-        id: cache-restore
+        id: cache_restore
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.DATA_DIR }}
@@ -49,53 +59,72 @@ jobs:
       - name: Ensure data dir
         run: mkdir -p "${{ env.DATA_DIR }}"
 
-      # Cài Nexus CLI
       - name: Install Nexus CLI
         run: |
+          set -eux
           curl -sSfL https://cli.nexus.xyz/ | sh
           echo "${HOME}/.nexus/bin" >> $GITHUB_PATH
 
-    
-    # Phát hiện binary nexus (nếu tên khác)
-- name: Detect Nexus CLI binary
-  run: |
-    set -eux
-    BIN1="${HOME}/.nexus/bin/nexus-network"
-    BIN2="${HOME}/.nexus/bin/nexus"
-    if [ -x "$BIN1" ]; then
-      echo "BIN=$BIN1" >> $GITHUB_ENV
-    elif [ -x "$BIN2" ]; then
-      echo "BIN=$BIN2" >> $GITHUB_ENV
-    else
-      echo "❌ Không tìm thấy Nexus CLI trong ~/.nexus/bin"; ls -la ~/.nexus/bin || true; exit 1
-    fi
+      - name: Debug environment
+        run: |
+          set -eux
+          echo "$PATH"
+          ls -la "${HOME}/.nexus" || true
+          ls -la "${HOME}/.nexus/bin" || true
+          which nexus-network || true
+          which nexus || true
 
-# Chạy node ~5h55m, stream log và upload artifact
-- name: Start Nexus node (~5h55m)
-  env:
-    NODE_ID: ${{ secrets.NODE_ID }}
-  run: |
-    set -eux
-    "${BIN}" --version || true
-    # Nếu CLI hỗ trợ --data-dir, thêm vào sau start để dùng cache của bạn
-    timeout 5h55m "${BIN}" start --network testnet --node-id "${NODE_ID}" 2>&1 | tee -a nexus.log || true
+      - name: Detect Nexus CLI binary
+        run: |
+          set -eux
+          BIN1="${HOME}/.nexus/bin/nexus-network"
+          BIN2="${HOME}/.nexus/bin/nexus"
+          if [ -x "$BIN1" ]; then
+            echo "BIN=$BIN1" >> $GITHUB_ENV
+          elif [ -x "$BIN2" ]; then
+            echo "BIN=$BIN2" >> $GITHUB_ENV
+          else
+            echo "❌ Không tìm thấy Nexus CLI trong ~/.nexus/bin"
+            exit 1
+          fi
 
-- name: Upload node log
-  if: always()
-  uses: actions/upload-artifact@v4
-  with:
-    name: nexus.log
-    path: nexus.log
-    retention-days: 7
+      - name: Prime local CLI state from cache
+        run: |
+          mkdir -p "${HOME}/.nexus"
+          rsync -a "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" "${HOME}/.nexus/" || true
 
-      # Backup thành artifact
+      - name: Start Nexus node (~5h55m)
+        env:
+          NODE_ID: ${{ secrets.NODE_ID }} # phải tạo secret này = 37003063
+        run: |
+          set -eux
+          "${BIN}" --version || true
+          if [ -z "${NODE_ID:-}" ]; then
+            echo "❌ Chưa set secret NODE_ID trong repo (Settings → Secrets → Actions)."
+            exit 1
+          fi
+          timeout 5h55m "${BIN}" start --network testnet --node-id "${NODE_ID}" 2>&1 | tee -a nexus.log || true
+
+      - name: Sync back state
+        if: always()
+        run: |
+          rsync -a --delete "${HOME}/.nexus/" "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" || true
+
+      - name: Upload node log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexus.log
+          path: nexus.log
+          retention-days: 7
+
       - name: Compress data
         if: always()
         run: |
           sudo apt-get update -y && sudo apt-get install -y zstd
           tar -I "zstd -19" -cf "/tmp/${{ env.BACKUP_NAME }}" -C "${GITHUB_WORKSPACE}" "${{ env.DATA_DIR }}"
 
-      - name: Upload backup artifact (7 days)
+      - name: Upload backup artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -103,10 +132,10 @@ jobs:
           path: /tmp/${{ env.BACKUP_NAME }}
           retention-days: 7
 
-      # Lưu cache mới
-      - name: Save cache
+      - name: Save cache (best-effort)
         if: always()
+        continue-on-error: true
         uses: actions/cache/save@v4
         with:
           path: ${{ env.DATA_DIR }}
-          key: nexus-state-cli-v1-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}
+          key: nexus-state-cli-v1-${{ runner.os }}-${{ github.ref_name }}-${{ github.run_id }}-${{ github.run_attempt }}
