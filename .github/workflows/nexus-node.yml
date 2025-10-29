@@ -55,12 +55,7 @@ jobs:
           curl -sSfL https://cli.nexus.xyz/ | sh
           echo "${HOME}/.nexus/bin" >> $GITHUB_PATH
 
-      # Nếu CLI dùng ~/.nexus làm state mặc định, đồng bộ sang DATA_DIR trước khi chạy
-      - name: Prime local CLI state from cache (if exists)
-        run: |
-          mkdir -p "${HOME}/.nexus"
-          rsync -a "${GITHUB_WORKSPACE}/${{ env.DATA_DIR }}/" "${HOME}/.nexus/" || true
-
+    
     # Phát hiện binary nexus (nếu tên khác)
 - name: Detect Nexus CLI binary
   run: |
